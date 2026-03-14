@@ -148,6 +148,7 @@ function catalogarTudo() {
             props.setProperty(SUB_KEY, String(subIdx));
             props.setProperty(FILE_KEY, String(f));
             Logger.log("⏱️ Time budget — retoma guardada.");
+            _cleanupTempFiles();
             _enviarResumo(totalCatalogados, totalErros, resumo, true);
             return;
           }
@@ -183,6 +184,7 @@ function catalogarTudo() {
   props.deleteProperty(FILE_KEY);
 
   Logger.log("✅ Catalogação completa: " + totalCatalogados + " catalogados, " + totalErros + " erros.");
+  _cleanupTempFiles();
   _enviarResumo(totalCatalogados, totalErros, resumo, false);
 }
 
@@ -652,9 +654,10 @@ function _isPDFDigital(fileId) {
   var docId = null;
   try {
     var blob = DriveApp.getFileById(fileId).getBlob();
-    var result = Drive.Files.insert({ title: "DETECT_DIGITAL_" + fileId }, blob, { ocr: false });
+    var result = Drive.Files.insert({ title: "_TMP_DETECT_" + fileId, parents: [{ id: "root" }] }, blob, { ocr: false });
     if (!result || !result.id) return false;
     docId = result.id;
+    _registerTempFile(docId);
     Utilities.sleep(300);
     var text = DocumentApp.openById(docId).getBody().getText().trim();
     DriveApp.getFileById(docId).setTrashed(true);
@@ -977,6 +980,36 @@ function extractDataDocumento(pdfText) {
 
 
 // ============================================================================
+// CLEANUP DE FICHEIROS TEMPORÁRIOS (OCR + detecção digital)
+// ============================================================================
+
+var __tempFileIds = [];
+
+function _registerTempFile(fileId) {
+  __tempFileIds.push(fileId);
+}
+
+/** Apaga todos os ficheiros temporários criados durante a execução */
+function _cleanupTempFiles() {
+  for (var i = 0; i < __tempFileIds.length; i++) {
+    try { DriveApp.getFileById(__tempFileIds[i]).setTrashed(true); } catch (e) {}
+  }
+  // Fallback: procurar e apagar ficheiros _TMP_ órfãos no Drive
+  try {
+    var orphans = DriveApp.searchFiles("title contains '_TMP_' and trashed=false");
+    while (orphans.hasNext()) {
+      var f = orphans.next();
+      if (f.getName().indexOf("_TMP_") === 0) {
+        f.setTrashed(true);
+        Logger.log("🧹 Temp órfão apagado: " + f.getName());
+      }
+    }
+  } catch (e) {}
+  __tempFileIds = [];
+}
+
+
+// ============================================================================
 // ALGORITMO DE CONSENSO DE DATAS (6 fontes → data mais votada)
 // ============================================================================
 
@@ -1110,7 +1143,7 @@ function convertPDFToText(fileId, languages) {
       var docId = null;
       try {
         var blob = file.getBlob();
-        var resource = { title: "OCR_TEMP_" + file.getName() };
+        var resource = { title: "_TMP_OCR_" + file.getName() };
         var options = { ocr: true, ocrLanguage: lang || undefined };
 
         var ocrResult;
@@ -1123,6 +1156,7 @@ function convertPDFToText(fileId, languages) {
 
         if (!ocrResult || !ocrResult.id) throw new Error("ID nulo no OCR.");
         docId = ocrResult.id;
+        _registerTempFile(docId);
         Utilities.sleep(500);
         var doc = DocumentApp.openById(docId);
         var textContent = doc.getBody().getText();
