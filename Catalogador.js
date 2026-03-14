@@ -453,7 +453,7 @@ function _extrairTudoViaIA(textoPDF) {
     "- Nome do fornecedor (nome/razão social do emissor)\n\n" +
     "Regras:\n" +
     "- Valor total = Base tributável + IVA - Retenções + Outros\n" +
-    "- Em faturas de crédito/leasing, o Capital (amortização) NÃO faz parte da base tributável. Apenas os Juros e encargos são base tributável.\n\n" +
+    "- EXCEPÇÃO para faturas de crédito/leasing que discriminem Capital e Juros: a base tributável são APENAS os Juros e encargos (o Capital/amortização NÃO conta). Em comissões, seguros e outras faturas bancárias sem discriminação Capital/Juros, usa o valor total como base tributável normalmente.\n\n" +
     "Responde APENAS com um JSON válido:\n" +
     '{"bt": 0.00, "iva": 0.00, "retencoes": 0.00, "outros": 0.00, "atcud": "", "tipo": "", "nif": "", "fornecedor": ""}\n' +
     "Se não encontrares um valor, usa 0. Campos de texto desconhecidos = \"\".\n" +
