@@ -169,8 +169,61 @@ function catalogarTudo() {
         props.deleteProperty(FILE_KEY);
       }
 
-      // Terminou este mês
+      // Terminou sub-pastas #1/#2/#3
       props.deleteProperty(SUB_KEY);
+
+      // ── Catalogar Recibos (#4) e Comprovativos (#5) ──
+      var tabsFaturas = [
+        ss.getSheetByName("Faturas e NCs normais"),
+        ss.getSheetByName("Faturas e NCs com reembolso"),
+        ss.getSheetByName("Outros documentos")
+      ].filter(function(s) { return !!s; });
+
+      // #4 - Recibos
+      var pastaRecibos = _getSubFolder(mesInfo.folder, "#4 - Recibos");
+      if (pastaRecibos) {
+        var pcRecibos = _getSubFolder(pastaRecibos, "PARA CATALOGAR");
+        if (pcRecibos) {
+          var pdfsRecibos = _listarPDFs(pcRecibos);
+          if (pdfsRecibos.length > 0) {
+            Logger.log("  #4 - Recibos → " + pdfsRecibos.length + " PDFs em PARA CATALOGAR");
+            for (var r = 0; r < pdfsRecibos.length; r++) {
+              if ((Date.now() - start) > TIME_BUDGET_MS) {
+                Logger.log("⏱️ Time budget (recibos)");
+                _cleanupTempFiles();
+                _enviarResumo(totalCatalogados, totalErros, resumo, true);
+                return;
+              }
+              var resRecibo = _catalogarRecibo(pdfsRecibos[r], tabsFaturas, pastaRecibos, pcRecibos);
+              if (resRecibo.sucesso) { totalCatalogados++; resumo += "\n ✅ " + resRecibo.mensagem; }
+              else { totalErros++; resumo += "\n ❌ " + resRecibo.mensagem; }
+            }
+          }
+        }
+      }
+
+      // #5 - Comprovativos de pagamento
+      var pastaComprovativos = _getSubFolder(mesInfo.folder, "#5 - Comprovativos de pagamento");
+      if (pastaComprovativos) {
+        var pcComprovativos = _getSubFolder(pastaComprovativos, "PARA CATALOGAR");
+        if (pcComprovativos) {
+          var pdfsComprovativos = _listarPDFs(pcComprovativos);
+          if (pdfsComprovativos.length > 0) {
+            Logger.log("  #5 - Comprovativos → " + pdfsComprovativos.length + " PDFs em PARA CATALOGAR");
+            for (var c = 0; c < pdfsComprovativos.length; c++) {
+              if ((Date.now() - start) > TIME_BUDGET_MS) {
+                Logger.log("⏱️ Time budget (comprovativos)");
+                _cleanupTempFiles();
+                _enviarResumo(totalCatalogados, totalErros, resumo, true);
+                return;
+              }
+              var resComp = _catalogarComprovativo(pdfsComprovativos[c], tabsFaturas, pastaComprovativos, pcComprovativos);
+              if (resComp.sucesso) { totalCatalogados++; resumo += "\n ✅ " + resComp.mensagem; }
+              else { totalErros++; resumo += "\n ❌ " + resComp.mensagem; }
+            }
+          }
+        }
+      }
     }
 
     // Terminou este ano
@@ -992,6 +1045,251 @@ function extractDataDocumento(pdfText) {
   m = pdfText.match(/(\d{4})[\/\-](\d{2})[\/\-](\d{2})/);
   if (m) return m[3] + '/' + m[2] + '/' + m[1];
   return null;
+}
+
+
+// ============================================================================
+// CATALOGAÇÃO DE RECIBOS (#4)
+// ============================================================================
+// Recibos não criam linhas novas — procuram a fatura correspondente por valor
+// e preenchem a coluna "Recibo" com link para o ficheiro.
+
+function _catalogarRecibo(file, tabsFaturas, pastaDestino, paraCatalogar) {
+  var fileName = file.getName();
+  Logger.log("    🧾 Recibo: " + fileName);
+
+  var textoPDF = "";
+  try { textoPDF = convertPDFToText(file.getId(), ['pt', 'en', null]) || ""; }
+  catch (e) { return { sucesso: false, mensagem: fileName + ": Falha OCR" }; }
+  if (!textoPDF.trim()) return { sucesso: false, mensagem: fileName + ": PDF vazio" };
+
+  var valores = extractAmountFromRecibos(textoPDF);
+  if (!valores || valores.length === 0) {
+    return { sucesso: false, mensagem: fileName + ": Nenhum valor extraído" };
+  }
+
+  var LINHA_CABECALHO = 2;
+
+  for (var p = 0; p < tabsFaturas.length; p++) {
+    var sheet = tabsFaturas[p];
+    var ultimaLinha = sheet.getLastRow();
+    if (ultimaLinha <= LINHA_CABECALHO) continue;
+
+    var colValor = encontraColunaNoCabecalho(sheet, "Valor total", LINHA_CABECALHO);
+    var colRecibo = encontraColunaNoCabecalho(sheet, "Recibo", LINHA_CABECALHO);
+    var colNum = encontraColunaNoCabecalho(sheet, "Nº", LINHA_CABECALHO);
+    if (colValor <= 0 || colRecibo <= 0 || colNum <= 0) continue;
+
+    var valoresSheet = sheet.getRange(LINHA_CABECALHO + 1, colValor, ultimaLinha - LINHA_CABECALHO, 1).getValues();
+
+    for (var i = 0; i < valoresSheet.length; i++) {
+      var linhaAtual = LINHA_CABECALHO + 1 + i;
+      var valorFatura = parseFloat(Number(valoresSheet[i][0]).toFixed(2));
+      if (isNaN(valorFatura)) continue;
+
+      var celRecibo = sheet.getRange(linhaAtual, colRecibo);
+      if (!celRecibo.isBlank()) continue;
+
+      for (var j = 0; j < valores.length; j++) {
+        var valorRecibo = parseFloat(valores[j]);
+        if (valorRecibo === 0) continue;
+
+        if (Math.abs(valorFatura - valorRecibo) < 0.01) {
+          var numeroDoc = sheet.getRange(linhaAtual, colNum).getValue();
+          celRecibo.setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+          SpreadsheetApp.flush();
+
+          var novoNome = "REC" + numeroDoc + ".pdf";
+          file.setName(novoNome);
+          file.moveTo(pastaDestino);
+
+          Logger.log("    ✅ Recibo → fatura " + numeroDoc + " (valor " + valorRecibo + ")");
+          return { sucesso: true, mensagem: novoNome + " → fatura " + numeroDoc };
+        }
+      }
+    }
+  }
+
+  return { sucesso: false, mensagem: fileName + ": Nenhuma fatura correspondente" };
+}
+
+function extractAmountFromRecibos(content) {
+  if (!content) return null;
+  var amountRegex = /(?:\b|\D)(\d{1,3}(?:[.,]\d{3})*(?:[,\.]\d{2})?|\d{1,3}(?:[,\.]\d{2})?)(?:\s*euros?|\s*€)?(?:\b|\D)/gi;
+  var match;
+  var amounts = [];
+  while ((match = amountRegex.exec(content)) !== null) {
+    amounts.push(match[1].replace(',', '.'));
+  }
+  amounts = amounts.filter(function(v, i, a) { return a.indexOf(v) === i; }); // deduplica
+  return amounts.length > 0 ? amounts : null;
+}
+
+
+// ============================================================================
+// CATALOGAÇÃO DE COMPROVATIVOS (#5)
+// ============================================================================
+// Comprovativos não criam linhas novas — procuram a fatura correspondente
+// por ATCUD (prioritário) ou por valor, e preenchem as colunas
+// "Comprovativo de pagamento", "Data de pagamento" e "Método de pagamento".
+
+function _catalogarComprovativo(file, tabsFaturas, pastaDestino, paraCatalogar) {
+  var fileName = file.getName();
+  Logger.log("    💳 Comprovativo: " + fileName);
+
+  var textoPDF = "";
+  try { textoPDF = convertPDFToText(file.getId(), ['pt', 'en', null]) || ""; }
+  catch (e) { return { sucesso: false, mensagem: fileName + ": Falha OCR" }; }
+  if (!textoPDF.trim()) return { sucesso: false, mensagem: fileName + ": PDF vazio" };
+
+  var valorLiquido = parseFloat(extractAmountFromPayslip(textoPDF));
+  var dataPagamento = extractDateFromPayslip(textoPDF);
+  var atcudComprovativo = extractATCUDComprovativos(textoPDF);
+
+  // Detectar banco
+  var bancoDisplay = "Outro";
+  if (/CREDITO\s*AGRICOLA/i.test(textoPDF)) bancoDisplay = "Crédito Agrícola";
+  else if (/NET24/i.test(textoPDF)) bancoDisplay = "Montepio";
+  else if (/MILLENNIUM/i.test(textoPDF) || /BCP/i.test(textoPDF)) bancoDisplay = "Millennium BCP";
+  else if (/CAIXA\s*GERAL/i.test(textoPDF) || /CGD/i.test(textoPDF)) bancoDisplay = "CGD";
+
+  Logger.log("    Valor=" + valorLiquido + " Data=" + dataPagamento + " ATCUD=" + atcudComprovativo + " Banco=" + bancoDisplay);
+
+  var LINHA_CABECALHO = 2;
+  var candidatosValor = [];
+
+  // 1º: Match por ATCUD
+  if (atcudComprovativo) {
+    var atcudNorm = String(atcudComprovativo).replace(/\s/g, "");
+
+    for (var p = 0; p < tabsFaturas.length; p++) {
+      var sheet = tabsFaturas[p];
+      var ultimaLinha = sheet.getLastRow();
+      if (ultimaLinha <= LINHA_CABECALHO) continue;
+
+      var colATCUD = encontraColunaNoCabecalho(sheet, "ATCUD / Nº Documento", LINHA_CABECALHO);
+      var colMetodo = encontraColunaNoCabecalho(sheet, "Método de pagamento", LINHA_CABECALHO);
+      var colDataPag = encontraColunaNoCabecalho(sheet, "Data de pagamento", LINHA_CABECALHO);
+      var colComp = encontraColunaNoCabecalho(sheet, "Comprovativo de pagamento", LINHA_CABECALHO);
+      var colNum = encontraColunaNoCabecalho(sheet, "Nº", LINHA_CABECALHO);
+      if (colATCUD <= 0 || colComp <= 0 || colNum <= 0) continue;
+
+      for (var i = LINHA_CABECALHO + 1; i <= ultimaLinha; i++) {
+        var atcudLinha = String(sheet.getRange(i, colATCUD).getDisplayValue()).replace(/\s/g, "");
+        if (!atcudLinha || atcudLinha !== atcudNorm) continue;
+        if (!sheet.getRange(i, colComp).isBlank()) continue;
+
+        var numDoc = sheet.getRange(i, colNum).getValue();
+        if (colMetodo > 0) sheet.getRange(i, colMetodo).setValue(bancoDisplay);
+        if (colDataPag > 0) sheet.getRange(i, colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy');
+        sheet.getRange(i, colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+        SpreadsheetApp.flush();
+
+        var novoNome = "COMP" + numDoc + ".pdf";
+        file.setName(novoNome);
+        file.moveTo(pastaDestino);
+
+        Logger.log("    ✅ Comprovativo → fatura " + numDoc + " (ATCUD match)");
+        return { sucesso: true, mensagem: novoNome + " → fatura " + numDoc + " (ATCUD)" };
+      }
+    }
+  }
+
+  // 2º: Match por valor (se ATCUD não encontrou)
+  if (!isNaN(valorLiquido) && valorLiquido > 0) {
+    for (var p2 = 0; p2 < tabsFaturas.length; p2++) {
+      var sheet2 = tabsFaturas[p2];
+      var ultimaLinha2 = sheet2.getLastRow();
+      if (ultimaLinha2 <= LINHA_CABECALHO) continue;
+
+      var colValor2 = encontraColunaNoCabecalho(sheet2, "Valor total", LINHA_CABECALHO);
+      var colMetodo2 = encontraColunaNoCabecalho(sheet2, "Método de pagamento", LINHA_CABECALHO);
+      var colDataPag2 = encontraColunaNoCabecalho(sheet2, "Data de pagamento", LINHA_CABECALHO);
+      var colComp2 = encontraColunaNoCabecalho(sheet2, "Comprovativo de pagamento", LINHA_CABECALHO);
+      var colNum2 = encontraColunaNoCabecalho(sheet2, "Nº", LINHA_CABECALHO);
+      if (colValor2 <= 0 || colComp2 <= 0 || colNum2 <= 0) continue;
+
+      var valoresSheet = sheet2.getRange(LINHA_CABECALHO + 1, colValor2, ultimaLinha2 - LINHA_CABECALHO, 1).getValues();
+      for (var j = 0; j < valoresSheet.length; j++) {
+        var linhaAtual = LINHA_CABECALHO + 1 + j;
+        if (sheet2.getRange(linhaAtual, colComp2).isBlank() && Math.abs(valoresSheet[j][0] - valorLiquido) < 0.01) {
+          candidatosValor.push({
+            sheet: sheet2, row: linhaAtual,
+            numDoc: sheet2.getRange(linhaAtual, colNum2).getValue(),
+            colMetodo: colMetodo2, colDataPag: colDataPag2, colComp: colComp2
+          });
+        }
+      }
+    }
+
+    if (candidatosValor.length === 1) {
+      var cv = candidatosValor[0];
+      if (cv.colMetodo > 0) cv.sheet.getRange(cv.row, cv.colMetodo).setValue(bancoDisplay);
+      if (cv.colDataPag > 0) cv.sheet.getRange(cv.row, cv.colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy');
+      cv.sheet.getRange(cv.row, cv.colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+      SpreadsheetApp.flush();
+
+      var novoNome2 = "COMP" + cv.numDoc + ".pdf";
+      file.setName(novoNome2);
+      file.moveTo(pastaDestino);
+
+      Logger.log("    ✅ Comprovativo → fatura " + cv.numDoc + " (valor match)");
+      return { sucesso: true, mensagem: novoNome2 + " → fatura " + cv.numDoc + " (valor)" };
+
+    } else if (candidatosValor.length > 1) {
+      Logger.log("    ⚠️ Múltiplas faturas possíveis (" + candidatosValor.length + ") para valor " + valorLiquido);
+      return { sucesso: false, mensagem: fileName + ": Múltiplas faturas para valor " + valorLiquido };
+    }
+  }
+
+  return { sucesso: false, mensagem: fileName + ": Nenhuma fatura correspondente (ATCUD=" + (atcudComprovativo || "?") + " Valor=" + valorLiquido + ")" };
+}
+
+function extractAmountFromPayslip(content) {
+  if (!content) return null;
+  var amountRegex = /-?\d{1,3}(?:[ .]?\d{3})*(?:[,]\d{2})/g;
+  var match;
+  var amounts = [];
+  while ((match = amountRegex.exec(content)) !== null) {
+    var number = match[0];
+    if (number.replace(/[^0-9]/g, '').length > 8) continue;
+    var indexOfSaldo = content.toLowerCase().indexOf("saldo");
+    if (indexOfSaldo !== -1 && indexOfSaldo < match.index) continue;
+    var sanitized = number.replace(/\./g, '').replace(',', '.').replace('-', '').replace(' ', '');
+    amounts.push(sanitized);
+  }
+  return amounts.length > 0 ? amounts[0] : null;
+}
+
+function extractDateFromPayslip(content) {
+  if (!content) return null;
+  var words = content.split(/\s+/);
+  for (var i = 0; i < words.length; i++) {
+    var word = words[i];
+    if (/^\d{4}[-/]\d{2}[-/]\d{2}$/.test(word)) {
+      var p = word.split(/[-/]/);
+      return p[2] + '/' + p[1] + '/' + p[0];
+    }
+    if (/^\d{2}[-/]\d{2}[-/]\d{4}$/.test(word)) {
+      var p2 = word.split(/[-/]/);
+      return p2[0] + '/' + p2[1] + '/' + p2[2];
+    }
+  }
+  var m = content.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+  if (m) return ("0" + m[1]).slice(-2) + "/" + ("0" + m[2]).slice(-2) + "/" + m[3];
+  return null;
+}
+
+function extractATCUDComprovativos(pdfText) {
+  if (!pdfText) return null;
+  var text = pdfText.replace(/\s+/g, ' ').toUpperCase();
+  var regex = /\b([A-Z0-9]{8,}-\d{2,})\b/g;
+  var match;
+  var candidatos = [];
+  while ((match = regex.exec(text)) !== null) {
+    candidatos.push(match[1]);
+  }
+  return candidatos.length > 0 ? candidatos[0] : null;
 }
 
 
