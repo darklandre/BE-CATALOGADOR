@@ -398,12 +398,7 @@ function _catalogarUmPDF(file, sheet, pastaDestino, paraCatalogar, mesPlanilha, 
     sheet.getRange(novaLinha, cols.total).setFormulaR1C1(formula).setBackground("#d9d9d9");
   }
 
-  // 9. Renomear e mover (o ID não muda, links mantêm-se válidos)
-  var novoNome = novoNum + ".pdf";
-  file.setName(novoNome);
-  file.moveTo(pastaDestino);
-
-  // Link para o ficheiro
+  // Link para o ficheiro (antes de mover — URL não muda)
   if (cols.link > 0) {
     sheet.getRange(novaLinha, cols.link).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
   }
@@ -416,6 +411,25 @@ function _catalogarUmPDF(file, sheet, pastaDestino, paraCatalogar, mesPlanilha, 
   // Colorir NCs
   if (tipo === "Nota de crédito" && cols.data > 0 && cols.total > 0) {
     sheet.getRange(novaLinha, cols.data, 1, cols.total - cols.data).setBackground("#FFEBEB");
+  }
+
+  // Flush para garantir que o Sheet é gravado antes de mover
+  SpreadsheetApp.flush();
+
+  // 9. Renomear e mover (o ID não muda, links mantêm-se válidos)
+  var novoNome = novoNum + ".pdf";
+  file.setName(novoNome);
+  try {
+    file.moveTo(pastaDestino);
+  } catch (e) {
+    Logger.log("    ⚠️ moveTo falhou, a tentar makeCopy: " + String(e).substring(0, 80));
+    var copia = file.makeCopy(novoNome, pastaDestino);
+    file.setTrashed(true);
+    // Actualizar link para apontar para a cópia
+    if (cols.link > 0) {
+      sheet.getRange(novaLinha, cols.link).setFormula('=HYPERLINK("' + copia.getUrl() + '";"LINK")');
+      SpreadsheetApp.flush();
+    }
   }
 
   Logger.log("    ✅ Catalogado como " + novoNome + " | " + (fornecedor || "?") + " | " + data);
@@ -437,7 +451,9 @@ function _extrairTudoViaIA(textoPDF) {
     "- Tipo de documento (um de: Fatura, Fatura simplificada, Fatura-recibo, 2ª via fatura, Nota de crédito, Recibo, Recibo de renda)\n" +
     "- NIF do fornecedor (número de identificação fiscal do emissor)\n" +
     "- Nome do fornecedor (nome/razão social do emissor)\n\n" +
-    "Regra: Valor total = Base tributável + IVA - Retenções + Outros\n\n" +
+    "Regras:\n" +
+    "- Valor total = Base tributável + IVA - Retenções + Outros\n" +
+    "- Em faturas de crédito/leasing, o Capital (amortização) NÃO faz parte da base tributável. Apenas os Juros e encargos são base tributável.\n\n" +
     "Responde APENAS com um JSON válido:\n" +
     '{"bt": 0.00, "iva": 0.00, "retencoes": 0.00, "outros": 0.00, "atcud": "", "tipo": "", "nif": "", "fornecedor": ""}\n' +
     "Se não encontrares um valor, usa 0. Campos de texto desconhecidos = \"\".\n" +
