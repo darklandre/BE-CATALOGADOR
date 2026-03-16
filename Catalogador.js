@@ -719,20 +719,31 @@ function _listarPDFs(folder) {
  * Detecta se um PDF é digital (texto nativo) ou digitalizado (scan/imagem).
  * Tenta extrair texto sem OCR — se tiver texto substancial, é digital.
  */
+/**
+ * Detecta se um PDF é digital (texto nativo) ou scan (imagem).
+ * Usa o rácio texto/tamanho: PDFs digitais têm muitos caracteres por KB,
+ * scans têm poucos (o ficheiro é grande por ser imagem).
+ * Threshold: > 5 chars/KB = digital, < 2 chars/KB = scan.
+ */
 function _isPDFDigital(fileId) {
-  var docId = null;
   try {
-    var blob = DriveApp.getFileById(fileId).getBlob();
-    var result = Drive.Files.insert({ title: "_TMP_DETECT_" + fileId, parents: [{ id: "root" }] }, blob, { ocr: false });
-    if (!result || !result.id) return false;
-    docId = result.id;
-    _registerTempFile(docId);
-    Utilities.sleep(300);
-    var text = DocumentApp.openById(docId).getBody().getText().trim();
-    DriveApp.getFileById(docId).setTrashed(true);
-    return text.length > 20;
+    var file = DriveApp.getFileById(fileId);
+    var sizeBytes = file.getSize();
+    if (sizeBytes === 0) return false;
+    var sizeKB = sizeBytes / 1024;
+
+    // Extrair texto via OCR (já temos a função)
+    var text = convertPDFToText(fileId, ['pt']) || "";
+    var charCount = text.replace(/\s/g, "").length;
+    var ratio = charCount / sizeKB;
+
+    Logger.log("    [DIGITAL?] " + file.getName() + ": " + charCount + " chars / " + Math.round(sizeKB) + " KB = ratio " + ratio.toFixed(2));
+
+    // PDFs digitais: tipicamente > 5 chars/KB (texto denso, ficheiro pequeno)
+    // Scans: tipicamente < 2 chars/KB (imagem pesada, pouco texto extraído)
+    return ratio > 3;
   } catch (e) {
-    if (docId) { try { DriveApp.getFileById(docId).setTrashed(true); } catch (err) {} }
+    Logger.log("    [DIGITAL?] Erro: " + String(e).substring(0, 80));
     return false;
   }
 }
