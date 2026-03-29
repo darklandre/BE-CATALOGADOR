@@ -51,6 +51,15 @@ const PASTA_TAB_MAP = {
   "#3 - Outros documentos":           "Outros documentos"
 };
 
+// Mapeamento banco → código método de pagamento (para comprovativos)
+const METODO_PAGAMENTO = {
+  "credito agricola": "CA-778",
+  "creditoagricola":  "CA-778",
+  "crédito agrícola": "CA-778",
+  "bpi":              "BPI-185",
+  "montepio":         "MG-094"
+};
+
 // Mapeamento NIF → Motivo/Rubrica (conhecidos)
 const MOTIVO_POR_NIF = {
   "504615947": "Comunicações",                // MEO
@@ -332,8 +341,8 @@ function _catalogarUmPDF(file, sheet, pastaDestino, paraCatalogar, mesPlanilha, 
 
       } else {
         // Mesmo tipo (ambos digital ou ambos scan) → duplicado real, ignorar
-        Logger.log("    ⚠️ Duplicado real (mesmo tipo): " + atcud);
-        return { sucesso: false, mensagem: fileName + ": ATCUD duplicado (" + atcud + ")" };
+        Logger.log("    ⚠️ Duplicado real (mesmo tipo): " + atcud + " | Existente nº " + dupInfo.numero);
+        return { sucesso: false, mensagem: fileName + ": ATCUD duplicado (" + atcud + ", existente nº " + dupInfo.numero + ")" };
       }
     }
   }
@@ -721,27 +730,21 @@ function _listarPDFs(folder) {
  */
 /**
  * Detecta se um PDF é digital (texto nativo) ou scan (imagem).
- * Usa o rácio texto/tamanho: PDFs digitais têm muitos caracteres por KB,
- * scans têm poucos (o ficheiro é grande por ser imagem).
- * Threshold: > 5 chars/KB = digital, < 2 chars/KB = scan.
+ * Verifica se o PDF tem fonts embebidas (/BaseFont) no raw —
+ * um PDF digital tem sempre fonts, um scan (imagem) nunca tem.
  */
 function _isPDFDigital(fileId) {
   try {
     var file = DriveApp.getFileById(fileId);
-    var sizeBytes = file.getSize();
-    if (sizeBytes === 0) return false;
-    var sizeKB = sizeBytes / 1024;
+    var blob = file.getBlob();
+    var raw = blob.getDataAsString("ISO-8859-1");
 
-    // Extrair texto via OCR (já temos a função)
-    var text = convertPDFToText(fileId, ['pt']) || "";
-    var charCount = text.replace(/\s/g, "").length;
-    var ratio = charCount / sizeKB;
+    var fontCount = (raw.match(/\/BaseFont/g) || []).length;
+    var imageCount = (raw.match(/\/Subtype\s*\/Image/g) || []).length;
 
-    Logger.log("    [DIGITAL?] " + file.getName() + ": " + charCount + " chars / " + Math.round(sizeKB) + " KB = ratio " + ratio.toFixed(2));
-
-    // PDFs digitais: tipicamente > 5 chars/KB (texto denso, ficheiro pequeno)
-    // Scans: tipicamente < 2 chars/KB (imagem pesada, pouco texto extraído)
-    return ratio > 3;
+    var isDigital = fontCount > 0;
+    Logger.log("    [DIGITAL?] " + file.getName() + ": fonts=" + fontCount + " images=" + imageCount + " → " + (isDigital ? "DIGITAL" : "SCAN"));
+    return isDigital;
   } catch (e) {
     Logger.log("    [DIGITAL?] Erro: " + String(e).substring(0, 80));
     return false;
@@ -1107,7 +1110,7 @@ function _catalogarRecibo(file, tabsFaturas, pastaDestino, paraCatalogar) {
 
         if (Math.abs(valorFatura - valorRecibo) < 0.01) {
           var numeroDoc = sheet.getRange(linhaAtual, colNum).getValue();
-          celRecibo.setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+          celRecibo.setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")').setHorizontalAlignment("center").setBackground("white");
           SpreadsheetApp.flush();
 
           var novoNome = "REC" + numeroDoc + ".pdf";
@@ -1157,12 +1160,12 @@ function _catalogarComprovativo(file, tabsFaturas, pastaDestino, paraCatalogar) 
   var dataPagamento = extractDateFromPayslip(textoPDF);
   var atcudComprovativo = extractATCUDComprovativos(textoPDF);
 
-  // Detectar banco
-  var bancoDisplay = "Outro";
-  if (/CREDITO\s*AGRICOLA/i.test(textoPDF)) bancoDisplay = "Crédito Agrícola";
-  else if (/NET24/i.test(textoPDF)) bancoDisplay = "Montepio";
-  else if (/MILLENNIUM/i.test(textoPDF) || /BCP/i.test(textoPDF)) bancoDisplay = "Millennium BCP";
-  else if (/CAIXA\s*GERAL/i.test(textoPDF) || /CGD/i.test(textoPDF)) bancoDisplay = "CGD";
+  // Detectar banco → código método de pagamento
+  var bancoKey = null;
+  if (/CR[ÉE]DITO\s*AGR[ÍI]COLA|creditoagricola/i.test(textoPDF)) bancoKey = "credito agricola";
+  else if (/\bBPI\b/i.test(textoPDF)) bancoKey = "bpi";
+  else if (/\bNET24\b|MONTEPIO/i.test(textoPDF)) bancoKey = "montepio";
+  var bancoDisplay = bancoKey && METODO_PAGAMENTO[bancoKey] ? METODO_PAGAMENTO[bancoKey] : "Outro";
 
   Logger.log("    Valor=" + valorLiquido + " Data=" + dataPagamento + " ATCUD=" + atcudComprovativo + " Banco=" + bancoDisplay);
 
@@ -1191,9 +1194,9 @@ function _catalogarComprovativo(file, tabsFaturas, pastaDestino, paraCatalogar) 
         if (!sheet.getRange(i, colComp).isBlank()) continue;
 
         var numDoc = sheet.getRange(i, colNum).getValue();
-        if (colMetodo > 0) sheet.getRange(i, colMetodo).setValue(bancoDisplay);
-        if (colDataPag > 0) sheet.getRange(i, colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy');
-        sheet.getRange(i, colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+        if (colMetodo > 0) sheet.getRange(i, colMetodo).setValue(bancoDisplay).setHorizontalAlignment("center");
+        if (colDataPag > 0) sheet.getRange(i, colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy').setHorizontalAlignment("center").setBackground("white");
+        sheet.getRange(i, colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")').setHorizontalAlignment("center").setBackground("white");
         SpreadsheetApp.flush();
 
         var novoNome = "COMP" + numDoc + ".pdf";
@@ -1235,9 +1238,9 @@ function _catalogarComprovativo(file, tabsFaturas, pastaDestino, paraCatalogar) 
 
     if (candidatosValor.length === 1) {
       var cv = candidatosValor[0];
-      if (cv.colMetodo > 0) cv.sheet.getRange(cv.row, cv.colMetodo).setValue(bancoDisplay);
-      if (cv.colDataPag > 0) cv.sheet.getRange(cv.row, cv.colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy');
-      cv.sheet.getRange(cv.row, cv.colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")');
+      if (cv.colMetodo > 0) cv.sheet.getRange(cv.row, cv.colMetodo).setValue(bancoDisplay).setHorizontalAlignment("center");
+      if (cv.colDataPag > 0) cv.sheet.getRange(cv.row, cv.colDataPag).setValue(dataPagamento).setNumberFormat('dd/MM/yyyy').setHorizontalAlignment("center").setBackground("white");
+      cv.sheet.getRange(cv.row, cv.colComp).setFormula('=HYPERLINK("' + file.getUrl() + '";"LINK")').setHorizontalAlignment("center").setBackground("white");
       SpreadsheetApp.flush();
 
       var novoNome2 = "COMP" + cv.numDoc + ".pdf";
